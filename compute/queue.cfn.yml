@@ -1,0 +1,157 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Queue
+
+
+Parameters:
+
+  ParentStackName:
+    Description: Name of parent stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  BuildAccountId:
+    Description: The AWS build account id
+    Type: String
+
+  JobQueueVisibilityTimeout:
+    Type: Number
+    Description: The SQS visibility timeout
+    MinValue: 0
+    MaxValue: 43200
+    Default: 7200 # Two hour default
+
+  JobCompletedQueueVisibilityTimeout:
+    Type: Number
+    Description: The SQS visibility timeout
+    MinValue: 0
+    MaxValue: 43200
+    Default: 500
+
+
+Resources:
+
+  JobQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${DeploymentId}-${EnvironmentName}-${ParentStackName}-job
+      VisibilityTimeout: !Ref JobQueueVisibilityTimeout
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  JobCompletedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${DeploymentId}-${EnvironmentName}-${ParentStackName}-job-completed
+      VisibilityTimeout: !Ref JobCompletedQueueVisibilityTimeout
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  QueueShareStatsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Ref BuildAccountId
+            Action:
+              - sqs:GetQueueAttributes
+      Queues:
+        - !Ref JobQueue
+        - !Ref JobCompletedQueue
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  ParentStackName:
+    Description: Parent stack name
+    Value: !Ref ParentStackName
+    Export:
+      Name: !Sub ${AWS::StackName}-ParentStackName
+
+  EnvironmentName:
+    Description: Environment
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub ${AWS::StackName}-EnvironmentName
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  JobQueueUrl:
+    Description: Job queue url
+    Value: !Ref JobQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-JobQueueUrl
+
+  JobQueueArn:
+    Description: Job queue arn
+    Value: !GetAtt JobQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-JobQueueArn
+
+  JobQueueName:
+    Description: Job queue name
+    Value: !GetAtt JobQueue.QueueName
+    Export:
+      Name: !Sub ${AWS::StackName}-JobQueueName
+
+  JobCompletedQueueUrl:
+    Description: JobCompleted queue url
+    Value: !Ref JobCompletedQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-JobCompletedQueueUrl
+
+  JobCompletedQueueArn:
+    Description: JobCompleted queue arn
+    Value: !GetAtt JobCompletedQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-JobCompletedQueueArn
+
+  JobCompletedQueueName:
+    Description: JobCompleted queue name
+    Value: !GetAtt JobCompletedQueue.QueueName
+    Export:
+      Name: !Sub ${AWS::StackName}-JobCompletedQueueName
+

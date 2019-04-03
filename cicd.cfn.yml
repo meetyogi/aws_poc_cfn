@@ -1,0 +1,509 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Fargate external account CI/CD example
+
+
+Parameters:
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  DeploymentStackName:
+    Description: Deployment stack id to deploy to
+    Type: String
+
+  DeploymentAccountId:
+    Description: The AWS customer build destination account id
+    Type: String
+
+  BaseEcrImageAccountId:
+    Description: The base AWS ECR image account id
+    Type: String
+
+  ModelBucketName:
+    Description: The bucket to pull the models from
+    Type: String
+
+  CodeBuildDockerImage:
+    Type: String
+    Default: aws/codebuild/docker:17.09.0
+
+  GitSourceRepoApi:
+    Type: String
+    Description: GitHub source repository - must contain a Dockerfile in the base
+
+  GitSourceRepoWorker:
+    Type: String
+    Description: GitHub source repository for worker - must contain a Dockerfile in the base
+
+  GitBranchApi:
+    Type: String
+    Default: master
+    Description: GitHub git repository branch - change triggers a new build
+
+  GitBranchWorker:
+    Type: String
+    Default: master
+    Description: GitHub git repository branch - change triggers a new build
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub API token - https://github.com/blog/1509-personal-api-tokens
+
+  GitHubUser:
+    Type: String
+    Description: GitHub username or organization
+
+
+Resources:
+
+  CodePipelineApiArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref AWS::StackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  CodePipelineWorkerArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref AWS::StackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Worker
+
+  LogGroupBuildApi:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /app/${AWS::StackName}/build-api
+
+  LogGroupBuildWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /app/${AWS::StackName}/build-worker
+
+  EcrDockerRepositoryApi:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-api
+      RepositoryPolicyText:
+        Version: 2012-10-17
+        Statement:
+          - Sid: deploy-access
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${DeploymentAccountId}:root
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+
+  EcrDockerRepositoryWorker:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-worker
+      RepositoryPolicyText:
+        Version: 2012-10-17
+        Statement:
+          - Sid: deploy-access
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${DeploymentAccountId}:root
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+
+  CodeBuildProjectApi:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: !Ref CodeBuildDockerImage
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrDockerRepositoryApi}
+          - Name: ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: DEPLOYMENT_ACCOUNT_ID
+            Value: !Ref DeploymentAccountId
+          - Name: BASE_ECR_IMAGE_ACCOUNT_ID
+            Value: !Ref BaseEcrImageAccountId
+          - Name: DEPLOYMENT_ID
+            Value: !Ref DeploymentId
+          - Name: DEPLOYMENT_BUCKET_NAME
+            Value: !Sub ${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-api
+      Name: !Sub ${AWS::StackName}-api
+      ServiceRole: !Ref CodeBuildServiceRole
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LogGroupBuildApi
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref AWS::StackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  CodeBuildProjectWorker:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: !Ref CodeBuildDockerImage
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrDockerRepositoryWorker}
+          - Name: ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: DEPLOYMENT_ACCOUNT_ID
+            Value: !Ref DeploymentAccountId
+          - Name: BASE_ECR_IMAGE_ACCOUNT_ID
+            Value: !Ref BaseEcrImageAccountId
+          - Name: DEPLOYMENT_ID
+            Value: !Ref DeploymentId
+          - Name: DEPLOYMENT_BUCKET_NAME
+            Value: !Sub ${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-worker
+      Name: !Sub ${AWS::StackName}-worker
+      ServiceRole: !Ref CodeBuildServiceRole
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LogGroupBuildWorker
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref AWS::StackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Worker
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+              - Resource: !Sub arn:aws:s3:::${CodePipelineApiArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub arn:aws:s3:::${CodePipelineWorkerArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${BaseEcrImageAccountId}:repository/docker-golang-base
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepositoryApi}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepositoryWorker}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+              - Resource:
+                  - !Sub arn:aws:s3:::${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-api
+                  - !Sub arn:aws:s3:::${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-api/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+              - Resource:
+                  - !Sub arn:aws:s3:::${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-worker
+                  - !Sub arn:aws:s3:::${DeploymentId}-${EnvironmentName}-${DeploymentStackName}-worker/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+
+  CodePipelineWorker:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceWorkerRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineWorkerArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubUser
+                Repo: !Ref GitSourceRepoWorker
+                Branch: !Ref GitBranchWorker
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectWorker
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+    DependsOn:
+      - CodeBuildProjectWorker
+      - CodePipelineServiceWorkerRole
+
+  CodePipelineApi:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceApiRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineApiArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubUser
+                Repo: !Ref GitSourceRepoApi
+                Branch: !Ref GitBranchApi
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectApi
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+    DependsOn:
+      - CodeBuildProjectApi
+      - CodePipelineServiceApiRole
+
+  CodePipelineServiceWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+              - Resource: !Sub arn:aws:s3:::${CodePipelineWorkerArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+
+  CodePipelineServiceApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+              - Resource: !Sub arn:aws:s3:::${CodePipelineApiArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  CodePipelineWorkerName:
+    Value: !Ref CodePipelineWorker
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerName
+
+  CodePipelineApiName:
+    Value: !Ref CodePipelineApi
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiName
+
+  CodePipelineApiArtifactBucketName:
+    Value: !Ref CodePipelineApiArtifactBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiArtifactBucketName
+
+  CodePipelineApiArtifactBucketArn:
+    Value: !GetAtt CodePipelineApiArtifactBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiArtifactBucketArn
+
+  CodePipelineWorkerArtifactBucketName:
+    Value: !Ref CodePipelineWorkerArtifactBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerArtifactBucketName
+
+  CodePipelineWorkerArtifactBucketArn:
+    Value: !GetAtt CodePipelineWorkerArtifactBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerArtifactBucketArn
+

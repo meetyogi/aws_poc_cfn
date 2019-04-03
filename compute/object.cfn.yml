@@ -1,0 +1,402 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Object
+
+
+Parameters:
+
+  ParentStackName:
+    Description: Name of parent stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  VpcStackName:
+    Description: Name of an active CloudFormation stack that contains networking resources
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  ModelBucketName:
+    Description: The bucket to pull the models from
+    Type: String
+
+  BuildAccountId:
+    Description: The AWS build account id
+    Type: String
+
+
+Resources:
+
+  DeployS3CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  DeployS3CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DeployS3CloudTrailBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: cloudtrail-acl-check
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt DeployS3CloudTrailBucket.Arn
+          - Sid: cloudtrail-write
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${DeployS3CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CodePipelineApiReleaseBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${DeploymentId}-${EnvironmentName}-${ParentStackName}-api
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  CodePipelineApiReleaseBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodePipelineApiReleaseBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+            Resource:
+              - !Sub arn:aws:s3:::${CodePipelineApiReleaseBucket}
+              - !Sub arn:aws:s3:::${CodePipelineApiReleaseBucket}/*
+            Principal:
+              AWS: !Sub arn:aws:iam::${BuildAccountId}:root
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CodePipelineWorkerReleaseBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${DeploymentId}-${EnvironmentName}-${ParentStackName}-worker
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  CodePipelineWorkerReleaseBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodePipelineWorkerReleaseBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+            Resource:
+              - !Sub arn:aws:s3:::${CodePipelineWorkerReleaseBucket}
+              - !Sub arn:aws:s3:::${CodePipelineWorkerReleaseBucket}/*
+            Principal:
+              AWS: !Sub arn:aws:iam::${BuildAccountId}:root
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CodePipelineWorkerArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Worker
+
+  CodePipelineApiArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  CodePipelineWorkerArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Worker
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  DataTempBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  S3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      RouteTableIds:
+        - Fn::ImportValue: !Sub ${VpcStackName}-PrivateRouteTableSubnet0
+        - Fn::ImportValue: !Sub ${VpcStackName}-PrivateRouteTableSubnet1
+
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId:
+        Fn::ImportValue: !Sub ${VpcStackName}-VpcId
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  ParentStackName:
+    Description: Parent stack name
+    Value: !Ref ParentStackName
+    Export:
+      Name: !Sub ${AWS::StackName}-ParentStackName
+
+  EnvironmentName:
+    Description: Environment
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub ${AWS::StackName}-EnvironmentName
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  ModelBucketName:
+    Value: !Ref ModelBucketName
+    Export:
+      Name: !Sub ${AWS::StackName}-ModelBucketName
+
+  CodePipelineApiArtifactBucketName:
+    Value: !Ref CodePipelineApiArtifactBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiArtifactBucketName
+
+  CodePipelineApiArtifactBucketArn:
+    Value: !GetAtt CodePipelineApiArtifactBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiArtifactBucketArn
+
+  CodePipelineWorkerArtifactBucketName:
+    Value: !Ref CodePipelineWorkerArtifactBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerArtifactBucketName
+
+  CodePipelineWorkerArtifactBucketArn:
+    Value: !GetAtt CodePipelineWorkerArtifactBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerArtifactBucketArn
+
+  DataBucketName:
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-DataBucketName
+
+  DataBucketArn:
+    Value: !GetAtt DataBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DataBucketArn
+
+  DataTempBucketName:
+    Value: !Ref DataTempBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-DataTempBucketName
+
+  DataTempBucketArn:
+    Value: !GetAtt DataTempBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DataTempBucketArn
+
+  CodePipelineApiReleaseBucketName:
+    Value: !Ref CodePipelineApiReleaseBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiReleaseBucketName
+
+  CodePipelineApiReleaseBucketArn:
+    Value: !GetAtt CodePipelineApiReleaseBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineApiReleaseBucketArn
+
+  CodePipelineWorkerReleaseBucketName:
+    Value: !Ref CodePipelineWorkerReleaseBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerReleaseBucketName
+
+  CodePipelineWorkerReleaseBucketArn:
+    Value: !GetAtt CodePipelineWorkerReleaseBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CodePipelineWorkerReleaseBucketArn
+
+  DeployS3CloudTrailBucketName:
+    Value: !Ref DeployS3CloudTrailBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-DeployS3CloudTrailBucketName
+
+  DeployS3CloudTrailBucketArn:
+    Value: !GetAtt DeployS3CloudTrailBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DeployS3CloudTrailBucketArn
+

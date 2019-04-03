@@ -1,0 +1,656 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Fargate
+
+
+Parameters:
+
+  ParentStackName:
+    Description: Name of parent stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  QueueStackName:
+    Description: Name of queue stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  ObjectStackName:
+    Description: Name of object stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DbStackName:
+    Description: Name of db stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  VpcStackName:
+    Description: Name of vpc stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  BuildAccountId:
+    Description: The AWS build account id
+    Type: String
+
+  SeedDockerImage:
+    Type: String
+    Description: Initial image before CodePipeline is executed. Existing application images in ECR should override this parameter
+
+  ContainerCpuApi:
+    Type: Number
+    Description: Amount of CPU for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 512
+    MinValue: 256
+    MaxValue: 4096
+    ConstraintDescription: Value must be between 256 and 4096
+
+  ContainerMemoryApi:
+    Type: Number
+    Description: Amount of memory for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 1024
+    MinValue: 512
+    MaxValue: 30720
+    ConstraintDescription: Value must be between 512 and 30720
+
+  ContainerCpuWorker:
+    Type: Number
+    Description: Amount of CPU for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 256
+    MinValue: 256
+    MaxValue: 4096
+    ConstraintDescription: Value must be between 256 and 4096
+
+  ContainerMemoryWorker:
+    Type: Number
+    Description: Amount of memory for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 512
+    MinValue: 512
+    MaxValue: 30720
+    ConstraintDescription: Value must be between 512 and 30720
+
+  AppIngressPort:
+    Description: The application ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 8080
+
+  # Scaling params
+  WorkerServiceScaleEvaluationPeriods:
+    Description: The number of periods over which data is compared to the specified threshold
+    Type: Number
+    Default: 2
+    MinValue: 2
+
+  WorkerServiceQueueDepthScaleOutThreshold:
+    Type: Number
+    Description: Average queue depth value to trigger auto scaling out
+    Default: 20
+
+  WorkerServiceQueueDepthScaleInThreshold:
+    Type: Number
+    Description: Average queue depth value to trigger auto scaling in
+    Default: 25
+    MinValue: 0
+    ConstraintDescription: Value must be between 0 or more
+
+  WorkerTaskMinContainerCount:
+    Type: Number
+    Description: Minimum number of containers to run for the service
+    Default: 1
+    MinValue: 0
+
+  WorkerTaskMaxContainerCount:
+    Type: Number
+    Description: Maximum number of containers to run for the service when auto scaling out
+    Default: 5
+    MinValue: 1
+    ConstraintDescription: Value must be at least one
+
+
+Conditions:
+
+  IsProd: !Equals [ !Ref EnvironmentName, prod ]
+
+
+Resources:
+
+  FargateCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ParentStackName
+
+  LogGroupApi:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /app/${ParentStackName}/compute-api
+
+  LogGroupWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /app/${ParentStackName}/compute-worker
+
+  TaskRoleApi:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sqs-job-queue-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  Fn::ImportValue: !Sub ${QueueStackName}-JobQueueArn
+        - PolicyName: sqs-job-completed-queue-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                Resource:
+                  Fn::ImportValue: !Sub ${QueueStackName}-JobCompletedQueueArn
+        - PolicyName: neptune
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: neptune-db:*
+                Resource: !Sub
+                  - arn:aws:neptune-db:${AWS::Region}:${AWS::AccountId}:${ClusterResourceId}/*
+                  - ClusterResourceId:
+                      Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterResourceId
+        - PolicyName: get-secret
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Condition:
+                  ForAnyValue:StringLike:
+                    secretsmanager:VersionStage: AWSCURRENT
+                Resource:
+                  Fn::ImportValue: !Sub ${DbStackName}-DatabasePasswordSecretArn
+
+  TaskRoleWorker:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sqs-job-completed-queue-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  Fn::ImportValue: !Sub ${QueueStackName}-JobCompletedQueueArn
+        - PolicyName: sqs-job-queue-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                Resource:
+                  Fn::ImportValue: !Sub ${QueueStackName}-JobQueueArn
+        - PolicyName: data-s3-bucket
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: s3:*
+                Resource:
+                  - Fn::ImportValue: !Sub ${ObjectStackName}-DataBucketArn
+                  - !Sub
+                    - ${Arn}/*
+                    - Arn:
+                        Fn::ImportValue: !Sub ${ObjectStackName}-DataBucketArn
+        - PolicyName: neptune
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: neptune-db:*
+                Resource: !Sub
+                  - arn:aws:neptune-db:${AWS::Region}:${AWS::AccountId}:${ClusterResourceId}/*
+                  - ClusterResourceId:
+                      Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterResourceId
+        - PolicyName: get-secret
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Condition:
+                  ForAnyValue:StringLike:
+                    secretsmanager:VersionStage: AWSCURRENT
+                Resource:
+                  Fn::ImportValue: !Sub ${DbStackName}-DatabasePasswordSecretArn
+
+  FargateTaskDefinitionApi:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ParentStackName}-api
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref ContainerCpuApi
+      Memory: !Ref ContainerMemoryApi
+      NetworkMode: awsvpc
+      TaskRoleArn: !GetAtt TaskRoleApi.Arn
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub ${ParentStackName}-api
+          Image: !Ref SeedDockerImage
+          ReadonlyRootFilesystem: true
+          PortMappings:
+            - ContainerPort: !Ref AppIngressPort
+          Environment:
+            - Name: DATA_BUCKET
+              Value:
+                Fn::ImportValue: !Sub ${ObjectStackName}-DataBucketName
+            - Name: DATA_TEMP_BUCKET
+              Value:
+                Fn::ImportValue: !Sub ${ObjectStackName}-DataTempBucketName
+            - Name: MODEL_BUCKET
+              Value:
+                Fn::ImportValue: !Sub ${ObjectStackName}-ModelBucketName
+            - Name: DB_ENDPOINT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabaseEndpoint
+            - Name: DB_PORT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabasePort
+            - Name: DB_USER
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabaseUser
+            - Name: DB_PASSWORD_SECRET_NAME
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabasePasswordSecretName
+            - Name: GRAPH_DB_ENDPOINT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterEndpoint
+            - Name: GRAPH_DB_READ_ENDPOINT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterReadEndpoint
+            - Name: GRAPH_DB_PORT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterPort
+            - Name: GRAPH_DB_RESOURCE_NAME
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterName
+            - Name: GRAPH_DB_RESOURCE_ID
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterResourceId
+            - Name: SQS_JOB_QUEUE_URL
+              Value:
+                Fn::ImportValue: !Sub ${QueueStackName}-JobQueueUrl
+            - Name: SQS_JOB_COMPLETED_QUEUE_URL
+              Value:
+                Fn::ImportValue: !Sub ${QueueStackName}-JobCompletedQueueUrl
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: STACK_NAME
+              Value: !Ref ParentStackName
+            - Name: DEPLOYMENT_ID
+              Value: !Ref DeploymentId
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroupApi
+              awslogs-stream-prefix: api
+
+  FargateTaskDefinitionWorker:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ParentStackName}-worker
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref ContainerCpuWorker
+      Memory: !Ref ContainerMemoryWorker
+      NetworkMode: awsvpc
+      TaskRoleArn: !GetAtt TaskRoleWorker.Arn
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub ${ParentStackName}-worker
+          Image: !Ref SeedDockerImage
+          ReadonlyRootFilesystem: true
+          Environment:
+            - Name: DATA_BUCKET
+              Value:
+                Fn::ImportValue: !Sub ${ObjectStackName}-DataBucketName
+            - Name: DATA_TEMP_BUCKET
+              Value:
+                Fn::ImportValue: !Sub ${ObjectStackName}-DataTempBucketName
+            - Name: MODEL_BUCKET
+              Value:
+                Fn::ImportValue: !Sub ${ObjectStackName}-ModelBucketName
+            - Name: DB_ENDPOINT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabaseEndpoint
+            - Name: DB_PORT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabasePort
+            - Name: DB_USER
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabaseUser
+            - Name: DB_PASSWORD_SECRET_NAME
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-DatabasePasswordSecretName
+            - Name: GRAPH_DB_ENDPOINT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterEndpoint
+            - Name: GRAPH_DB_READ_ENDPOINT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterReadEndpoint
+            - Name: GRAPH_DB_PORT
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterPort
+            - Name: GRAPH_DB_RESOURCE_NAME
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterName
+            - Name: GRAPH_DB_RESOURCE_ID
+              Value:
+                Fn::ImportValue: !Sub ${DbStackName}-NeptuneClusterResourceId
+            - Name: SQS_JOB_QUEUE_URL
+              Value:
+                Fn::ImportValue: !Sub ${QueueStackName}-JobQueueUrl
+            - Name: SQS_JOB_COMPLETED_QUEUE_URL
+              Value:
+                Fn::ImportValue: !Sub ${QueueStackName}-JobCompletedQueueUrl
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: STACK_NAME
+              Value: !Ref ParentStackName
+            - Name: DEPLOYMENT_ID
+              Value: !Ref DeploymentId
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroupWorker
+              awslogs-stream-prefix: worker
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  FargateServiceApi:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref FargateCluster
+      ServiceName: !Sub ${ParentStackName}-api
+      DesiredCount: 2
+      LaunchType: FARGATE
+      TaskDefinition: !Ref FargateTaskDefinitionApi
+      LoadBalancers:
+        - ContainerName: !Sub ${ParentStackName}-api
+          ContainerPort: !Ref AppIngressPort
+          TargetGroupArn:
+            Fn::ImportValue: !Sub ${VpcStackName}-ApiTargetGroupArn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub ${VpcStackName}-AppSecurityGroupId
+          Subnets:
+            - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId0
+            - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId1
+    DependsOn:
+      - FargateCluster
+      - FargateTaskDefinitionApi
+
+  FargateServiceWorker:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref FargateCluster
+      ServiceName: !Sub ${ParentStackName}-worker
+      DesiredCount: !Ref WorkerTaskMinContainerCount
+      LaunchType: FARGATE
+      TaskDefinition: !Ref FargateTaskDefinitionWorker
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Sub ${VpcStackName}-AppSecurityGroupId
+          Subnets:
+            - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId0
+            - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId1
+    DependsOn:
+      - FargateCluster
+      - FargateTaskDefinitionWorker
+
+  ServiceAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: service-autoscaling
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:*
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                Resource: '*'
+
+  WorkerServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref WorkerTaskMinContainerCount
+      MaxCapacity: !Ref WorkerTaskMaxContainerCount
+      ResourceId: !Sub
+        - service/${EcsClusterName}/${EcsWorkerServiceName}
+        - EcsClusterName: !Ref FargateCluster
+          EcsWorkerServiceName: !Sub ${ParentStackName}-worker # There is a bug in the GetAtt Service.Name call
+      RoleARN: !GetAtt ServiceAutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn:
+      - FargateServiceWorker
+
+  WorkerServiceScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ScaleOutPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref WorkerServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: 1
+            MetricIntervalLowerBound: 0
+    DependsOn: WorkerServiceScalingTarget
+
+  WorkerServiceScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ScaleInPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref WorkerServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: -1
+            MetricIntervalUpperBound: 0
+    DependsOn: WorkerServiceScalingTarget
+
+  WorkerServiceScaleOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: !Ref WorkerServiceScaleEvaluationPeriods
+      Statistic: Average
+      TreatMissingData: notBreaching
+      Threshold: !Ref WorkerServiceQueueDepthScaleOutThreshold
+      AlarmDescription: Alarm to add capacity if queue depth is high
+      Period: 60
+      AlarmActions:
+        - !Ref WorkerServiceScaleOutPolicy
+      Namespace:  AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::ImportValue: !Sub ${QueueStackName}-JobQueueName
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: ApproximateNumberOfMessagesVisible
+    DependsOn:
+      - FargateServiceWorker
+      - WorkerServiceScaleOutPolicy
+
+  WorkerServiceScaleInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: !Ref WorkerServiceScaleEvaluationPeriods
+      Statistic: Average
+      TreatMissingData: notBreaching
+      Threshold: !Ref WorkerServiceQueueDepthScaleInThreshold
+      AlarmDescription: Alarm to reduce capacity if container queue depth is low
+      Period: 300
+      AlarmActions:
+        - !Ref WorkerServiceScaleInPolicy
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::ImportValue: !Sub ${QueueStackName}-JobQueueName
+      ComparisonOperator: LessThanThreshold
+      MetricName: ApproximateNumberOfMessagesVisible
+    DependsOn:
+      - FargateServiceWorker
+      - WorkerServiceScaleInPolicy
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  ParentStackName:
+    Description: Parent stack name
+    Value: !Ref ParentStackName
+    Export:
+      Name: !Sub ${AWS::StackName}-ParentStackName
+
+  EnvironmentName:
+    Description: Environment
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub ${AWS::StackName}-EnvironmentName
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  FargateClusterName:
+    Value: !Ref FargateCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateClusterName
+
+  FargateClusterArn:
+    Value: !GetAtt FargateCluster.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateClusterArn
+
+  FargateServiceApiArn:
+    Value: !Ref FargateServiceApi
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateServiceApiArn
+
+  FargateServiceApiName:
+    Value: !Sub ${ParentStackName}-api
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateServiceApiName
+
+  FargateServiceWorkerArn:
+    Value: !Ref FargateServiceWorker
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateServiceWorkerArn
+
+  # There is a CFN bug if you have multiple services in the same template, the
+  # name attribute is not correct, so we are manually setting it.
+  FargateServiceWorkerName:
+    Value: !Sub ${ParentStackName}-worker
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateServiceWorkerName
+

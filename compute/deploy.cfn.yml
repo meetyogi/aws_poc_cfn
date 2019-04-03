@@ -1,0 +1,646 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Deploy
+
+
+Parameters:
+
+  ParentStackName:
+    Description: Name of parent stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  FargateStackName:
+    Description: Name of fargate stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  VpcStackName:
+    Description: Name of VPC stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  ObjectStackName:
+    Description: Name of object stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  BuildAccountId:
+    Description: The AWS build account id
+    Type: String
+
+  CodeBuildDockerImage:
+    Type: String
+    Default: aws/codebuild/docker:17.09.0
+
+
+Resources:
+
+  DeployCloudWatchEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineApi}
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineWorker}
+
+  DeployS3CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      S3BucketName:
+        Fn::ImportValue: !Sub ${ObjectStackName}-DeployS3CloudTrailBucketName
+      EventSelectors:
+        - DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub
+                    - ${Arn}/images.zip
+                    - Arn:
+                        Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiReleaseBucketArn
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub
+                    - ${Arn}/images.zip
+                    - Arn:
+                        Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerReleaseBucketArn
+          ReadWriteType: WriteOnly
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+
+  DeployApiCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - PutObject
+            - CompleteMultipartUpload
+          resources:
+            ARN:
+              - !Sub
+                  - ${Arn}/images.zip
+                  - Arn:
+                      Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiReleaseBucketArn
+      Targets:
+        - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineApi}
+          RoleArn: !GetAtt DeployCloudWatchEventRole.Arn
+          Id: !Sub ${AWS::StackName}-CodePipelineApi
+
+  DeployWorkerCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - PutObject
+            - CompleteMultipartUpload
+          resources:
+            ARN:
+              - !Sub
+                - ${Arn}/images.zip
+                - Arn:
+                    Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerReleaseBucketArn
+      Targets:
+        - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipelineWorker}
+          RoleArn: !GetAtt DeployCloudWatchEventRole.Arn
+          Id: !Sub ${AWS::StackName}-CodePipelineWorker
+
+  LogGroupBuildApi:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /app/${ParentStackName}/build-api
+
+  LogGroupBuildWorker:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /app/${ParentStackName}/build-worker
+
+  EcrDockerRepositoryApi:
+    Type: AWS::ECR::Repository
+
+  EcrDockerRepositoryWorker:
+    Type: AWS::ECR::Repository
+
+  CodeBuildProjectApi:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub
+          - |
+            ---
+            version: 0.2
+            phases:
+              install:
+                commands:
+                  - apt-get update && apt-get -y install python-pip jq && pip install --upgrade python && pip install --upgrade awscli
+              pre_build:
+                  commands:
+                  - IMAGE_URI=$(cat images.json | jq '.[0].imageUri' | tr -d \")
+                  - echo $IMAGE_URI
+                  - TAG="$(date +%Y-%m-%d.%H.%M.%S)"
+                  - $(aws ecr get-login --no-include-email --registry-ids $BUILD_ACCOUNT_ID)
+                  - docker pull $IMAGE_URI
+                  - $(aws ecr get-login --no-include-email)
+                  - docker tag $IMAGE_URI $REPOSITORY_URI:$TAG
+              post_build:
+                commands:
+                  - docker push $REPOSITORY_URI:$TAG
+                  - printf '[{"name":"${ServiceName}","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > images.json
+            artifacts:
+              files: images.json
+          - ServiceName: !Sub ${ParentStackName}-api
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: !Ref CodeBuildDockerImage
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrDockerRepositoryApi}
+          - Name: ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: BUILD_ACCOUNT_ID
+            Value: !Ref BuildAccountId
+          - Name: DEPLOYMENT_ID
+            Value: !Ref DeploymentId
+      Name: !Sub ${ParentStackName}-api
+      ServiceRole: !Ref CodeBuildServiceRole
+      VpcConfig:
+        VpcId:
+          Fn::ImportValue: !Sub ${VpcStackName}-VpcId
+        Subnets:
+          - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId0
+          - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId1
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${VpcStackName}-AppSecurityGroupId
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LogGroupBuildApi
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Api
+
+  CodeBuildProjectWorker:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub
+          - |
+            ---
+            version: 0.2
+            phases:
+              install:
+                commands:
+                  - apt-get update && apt-get -y install python-pip jq && pip install --upgrade python && pip install --upgrade awscli
+              pre_build:
+                  commands:
+                  - IMAGE_URI=$(cat images.json | jq '.[0].imageUri' | tr -d \")
+                  - echo $IMAGE_URI
+                  - TAG="$(date +%Y-%m-%d.%H.%M.%S)"
+                  - $(aws ecr get-login --no-include-email --registry-ids $BUILD_ACCOUNT_ID)
+                  - docker pull $IMAGE_URI
+                  - $(aws ecr get-login --no-include-email)
+                  - docker tag $IMAGE_URI $REPOSITORY_URI:$TAG
+              post_build:
+                commands:
+                  - docker push $REPOSITORY_URI:$TAG
+                  - printf '[{"name":"${ServiceName}","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > images.json
+            artifacts:
+              files: images.json
+          - ServiceName: !Sub ${ParentStackName}-worker
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: !Ref CodeBuildDockerImage
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrDockerRepositoryWorker}
+          - Name: ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: BUILD_ACCOUNT_ID
+            Value: !Ref BuildAccountId
+          - Name: DEPLOYMENT_ID
+            Value: !Ref DeploymentId
+      Name: !Sub ${ParentStackName}-worker
+      ServiceRole: !Ref CodeBuildServiceRole
+      VpcConfig:
+        VpcId:
+          Fn::ImportValue: !Sub ${VpcStackName}-VpcId
+        Subnets:
+          - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId0
+          - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId1
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${VpcStackName}-AppSecurityGroupId
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LogGroupBuildWorker
+      Tags:
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Type
+          Value: Worker
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeDhcpOptions
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                  - ec2:CreateNetworkInterfacePermission
+              - Resource: !Sub
+                - ${Arn}/*
+                - Arn:
+                    Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiArtifactBucketArn
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub
+                - ${Arn}/*
+                - Arn:
+                    Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerArtifactBucketArn
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepositoryApi}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepositoryWorker}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${BuildAccountId}:repository/${DeploymentId}-${EnvironmentName}-${ParentStackName}-api
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${BuildAccountId}:repository/${DeploymentId}-${EnvironmentName}-${ParentStackName}-worker
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+
+  CodePipelineWorker:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceWorkerRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: S3
+              Configuration:
+                S3Bucket:
+                  Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerReleaseBucketName
+                S3ObjectKey: images.zip
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectWorker
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ECS
+              Configuration:
+                ClusterName:
+                  Fn::ImportValue: !Sub ${FargateStackName}-FargateClusterName
+                ServiceName: !Sub ${ParentStackName}-worker
+                FileName: images.json
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+    DependsOn:
+      - CodeBuildProjectWorker
+      - CodePipelineServiceWorkerRole
+
+  CodePipelineApi:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineServiceApiRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: S3
+              Configuration:
+                PollForSourceChanges: false
+                S3Bucket:
+                  Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiReleaseBucketName
+                S3ObjectKey: images.zip
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectApi
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ECS
+              Configuration:
+                ClusterName:
+                  Fn::ImportValue: !Sub ${FargateStackName}-FargateClusterName
+                ServiceName: !Sub ${ParentStackName}-api
+                FileName: images.json
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+    DependsOn:
+      - CodeBuildProjectApi
+      - CodePipelineServiceApiRole
+
+  CodePipelineServiceWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - ecs:List*
+                  - ecs:Describe*
+                  - ecs:RegisterTaskDefinition
+                  - ecs:UpdateService
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+              - Resource: !Sub
+                  - ${Arn}/*
+                  - Arn:
+                      Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerReleaseBucketArn
+                Effect: Allow
+                Action:
+                  - s3:*
+              - Resource:
+                  - Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerReleaseBucketArn
+                Effect: Allow
+                Action:
+                  - s3:*
+              - Resource: !Sub
+                  - ${Arn}/*
+                  - Arn:
+                      Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineWorkerArtifactBucketArn
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${BuildAccountId}:repository/${DeploymentId}-${EnvironmentName}-${ParentStackName}-worker
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+
+  CodePipelineServiceApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - ecs:List*
+                  - ecs:Describe*
+                  - ecs:RegisterTaskDefinition
+                  - ecs:UpdateService
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+              - Resource: !Sub
+                  - ${Arn}/*
+                  - Arn:
+                      Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiReleaseBucketArn
+                Effect: Allow
+                Action:
+                  - s3:*
+              - Resource:
+                  - Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiReleaseBucketArn
+                Effect: Allow
+                Action:
+                  - s3:*
+              - Resource: !Sub
+                  - ${Arn}/*
+                  - Arn:
+                      Fn::ImportValue: !Sub ${ObjectStackName}-CodePipelineApiArtifactBucketArn
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${BuildAccountId}:repository/${DeploymentId}-${EnvironmentName}-${ParentStackName}-api
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+

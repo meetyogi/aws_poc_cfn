@@ -1,0 +1,280 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Database
+
+
+Parameters:
+
+  ParentStackName:
+    Description: Name of parent stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  VpcStackName:
+    Description: Name of an active CloudFormation stack that contains networking resources
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  DatabaseName:
+    Default: compute
+    Type: String
+    Description: Database name
+    MinLength: 5
+    MaxLength: 30
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Name must begin with a letter and contain only alphanumeric characters
+
+  DatabaseUser:
+    Default: root
+    Type: String
+    Description: Database admin account name
+    MinLength: 4
+    MaxLength: 16
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Name must begin with a letter and contain only alphanumeric characters
+
+  DatabasePassword:
+    NoEcho: true
+    Type: String
+    Description: Database admin account password
+    MinLength: 6
+    MaxLength: 41
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: Password must contain only alphanumeric characters
+
+  DatabaseSize:
+    Default: 100
+    Type: Number
+    Description: Database storage size in gigabytes (GB)
+    MinValue: 5
+    ConstraintDescription: Enter a size of at least 5 GB
+
+  DatabaseInstanceClass:
+    Default: db.t3.medium
+    Type: String
+    Description: Database instance class
+    ConstraintDescription: DB instance class not supported
+
+  NeptuneInstanceClass:
+    Default: db.r4.large
+    Type: String
+    Description: Neptune instance class
+    ConstraintDescription: Neptune instance class not supported
+
+
+Conditions:
+
+  IsProd: !Equals [ !Ref EnvironmentName, prod ]
+
+
+Resources:
+
+  DatabasePasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      SecretString: !Ref DatabasePassword
+      Name: !Sub ${ParentStackName}-DatabasePassword
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Database subnet group
+      SubnetIds:
+      - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId0
+      - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId1
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub ${VpcStackName}-DbSecurityGroupId
+      Engine: postgres
+      EngineVersion: 10.6
+      DBName: !Ref DatabaseName
+      MasterUsername: !Ref DatabaseUser
+      MasterUserPassword: !Ref DatabasePassword
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: !Ref DatabaseSize
+      StorageType: gp2
+      MultiAZ: !If [ IsProd, true, false ]
+      StorageEncrypted: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+    DeletionPolicy: Snapshot
+    DependsOn: DatabaseSubnetGroup
+
+  NeptuneSubnetGroup:
+    Type: AWS::Neptune::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Neptune subnet group
+      SubnetIds:
+      - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId0
+      - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnetId1
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  NeptuneCluster:
+    Type: AWS::Neptune::DBCluster
+    Properties:
+      DBSubnetGroupName: !Ref NeptuneSubnetGroup
+      IamAuthEnabled: true
+      StorageEncrypted: true
+      VpcSecurityGroupIds:
+        - Fn::ImportValue: !Sub ${VpcStackName}-NeptuneSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  NeptuneInstance0:
+    Type: AWS::Neptune::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref NeptuneCluster
+      DBInstanceClass: !Ref NeptuneInstanceClass
+      DBSubnetGroupName: !Ref NeptuneSubnetGroup
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  NeptuneInstance1:
+    Type: AWS::Neptune::DBInstance
+    Condition: IsProd
+    Properties:
+      DBClusterIdentifier: !Ref NeptuneCluster
+      DBInstanceClass: !Ref NeptuneInstanceClass
+      DBSubnetGroupName: !Ref NeptuneSubnetGroup
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  ParentStackName:
+    Description: Parent stack name
+    Value: !Ref ParentStackName
+    Export:
+      Name: !Sub ${AWS::StackName}-ParentStackName
+
+  EnvironmentName:
+    Description: Environment
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub ${AWS::StackName}-EnvironmentName
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  DatabaseName:
+    Value: !Ref Database
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseName
+
+  DatabaseUser:
+    Value: !Ref DatabaseUser
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseUser
+
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseEndpoint
+
+  DatabasePort:
+    Value: !GetAtt Database.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabasePort
+
+  DatabasePasswordSecretArn:
+    Value: !Ref DatabasePasswordSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabasePasswordSecretArn
+
+  DatabasePasswordSecretName:
+    Value: !Sub ${ParentStackName}-DatabasePassword
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabasePasswordSecretName
+
+  NeptuneClusterName:
+    Value: !Ref NeptuneCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-NeptuneClusterName
+
+  NeptuneClusterEndpoint:
+    Value: !GetAtt NeptuneCluster.Endpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-NeptuneClusterEndpoint
+
+  NeptuneClusterReadEndpoint:
+    Value: !GetAtt NeptuneCluster.ReadEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-NeptuneClusterReadEndpoint
+
+  NeptuneClusterPort:
+    Value: !GetAtt NeptuneCluster.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-NeptuneClusterPort
+
+  NeptuneClusterResourceId:
+    Value: !GetAtt NeptuneCluster.ClusterResourceId
+    Export:
+      Name: !Sub ${AWS::StackName}-NeptuneClusterResourceId
+

@@ -1,0 +1,359 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Compute Example
+
+
+Parameters:
+
+  TemplateBucketName:
+    Type: String
+    Default: poc-compute-example-cfn
+    Description: The template bucket for the CloudFormation templates
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  ModelBucketName:
+    Description: The bucket to pull the models from
+    Type: String
+
+  BuildAccountId:
+    Description: The AWS build account id
+    Type: String
+
+  AvailabilityZone0:
+    Description: The first availability zone in the region
+    Type: AWS::EC2::AvailabilityZone::Name
+    ConstraintDescription: Must be a valid availability zone
+
+  AvailabilityZone1:
+    Description: The second availability zone in the region
+    Type: AWS::EC2::AvailabilityZone::Name
+    ConstraintDescription: Must be a valid availability zone
+
+  SslCertificateArn:
+    Type: String
+    Description: The SSL/TLS certificate ARN
+    MinLength: 0
+    MaxLength: 2048
+    Default: ""
+
+  SeedDockerImage:
+    Type: String
+    Description: Initial image before CodePipeline is executed. Existing application images in ECR should override this parameter
+
+  CodeBuildDockerImage:
+    Type: String
+    Default: aws/codebuild/docker:17.09.0
+
+  ContainerCpuApi:
+    Type: Number
+    Description: Amount of CPU for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 512
+    MinValue: 256
+    MaxValue: 4096
+    ConstraintDescription: Value must be between 256 and 4096
+
+  ContainerMemoryApi:
+    Type: Number
+    Description: Amount of memory for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 1024
+    MinValue: 512
+    MaxValue: 30720
+    ConstraintDescription: Value must be between 512 and 30720
+
+  ContainerCpuWorker:
+    Type: Number
+    Description: Amount of CPU for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 256
+    MinValue: 256
+    MaxValue: 4096
+    ConstraintDescription: Value must be between 256 and 4096
+
+  ContainerMemoryWorker:
+    Type: Number
+    Description: Amount of memory for the container - https://aws.amazon.com/fargate/pricing/
+    Default: 512
+    MinValue: 512
+    MaxValue: 30720
+    ConstraintDescription: Value must be between 512 and 30720
+
+  DatabaseName:
+    Default: compute
+    Type: String
+    Description: Database name
+    MinLength: 5
+    MaxLength: 30
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Name must begin with a letter and contain only alphanumeric characters
+
+  DatabaseUser:
+    Default: root
+    Type: String
+    Description: Database admin account name
+    MinLength: 4
+    MaxLength: 16
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Name must begin with a letter and contain only alphanumeric characters
+
+  DatabasePassword:
+    NoEcho: true
+    Type: String
+    Description: Database admin account password
+    MinLength: 6
+    MaxLength: 41
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: Password must contain only alphanumeric characters
+
+  DatabaseSize:
+    Default: 100
+    Type: Number
+    Description: Database storage size in gigabytes (GB)
+    MinValue: 5
+    ConstraintDescription: Enter a size of at least 5 GB
+
+  DatabaseInstanceClass:
+    Default: db.t3.medium
+    Type: String
+    Description: Database instance class
+    ConstraintDescription: DB instance class not supported
+
+  NeptuneInstanceClass:
+    Default: db.r4.large
+    Type: String
+    Description: Neptune instance class
+    ConstraintDescription: Neptune instance class not supported
+
+  AlbIngressPort:
+    Description: The ALB ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 80
+
+  AppIngressPort:
+    Description: The application ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 8080
+
+  AppProtocol:
+    Type: String
+    Description: The application server protocol
+    Default: HTTP
+    AllowedValues:
+      - HTTP
+      - HTTPS
+    ConstraintDescription: Specify either HTTTP or HTTPS
+
+  # Scaling params
+  WorkerServiceScaleEvaluationPeriods:
+    Description: The number of periods over which data is compared to the specified threshold
+    Type: Number
+    Default: 2
+    MinValue: 2
+
+  WorkerServiceQueueDepthScaleOutThreshold:
+    Type: Number
+    Description: Average queue depth value to trigger auto scaling out
+    Default: 20
+
+  WorkerServiceQueueDepthScaleInThreshold:
+    Type: Number
+    Description: Average queue depth value to trigger auto scaling in
+    Default: 25
+    MinValue: 0
+    ConstraintDescription: Value must be between 0 or more
+
+  WorkerTaskMinContainerCount:
+    Type: Number
+    Description: Minimum number of containers to run for the service
+    Default: 1
+    MinValue: 0
+
+  WorkerTaskMaxContainerCount:
+    Type: Number
+    Description: Maximum number of containers to run for the service when auto scaling out
+    Default: 5
+    MinValue: 1
+    ConstraintDescription: Value must be at least one
+
+  JobQueueVisibilityTimeout:
+    Type: Number
+    Description: The SQS visibility timeout
+    MinValue: 0
+    MaxValue: 43200
+    Default: 7200 # Two hour default
+
+  JobCompletedQueueVisibilityTimeout:
+    Type: Number
+    Description: The SQS visibility timeout
+    MinValue: 0
+    MaxValue: 43200
+    Default: 500
+
+
+Resources:
+
+
+  VpcStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucketName}/compute/vpc.cfn.yml
+      Parameters:
+        ParentStackName: !Ref AWS::StackName
+        DeploymentId: !Ref DeploymentId
+        EnvironmentName: !Ref EnvironmentName
+        AvailabilityZone0: !Ref AvailabilityZone0
+        AvailabilityZone1: !Ref AvailabilityZone1
+        SslCertificateArn: !Ref SslCertificateArn
+        AlbIngressPort: !Ref AlbIngressPort
+        AppIngressPort: !Ref AppIngressPort
+        AppProtocol: !Ref AppProtocol
+
+  ObjectStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucketName}/compute/object.cfn.yml
+      Parameters:
+        ParentStackName: !Ref AWS::StackName
+        DeploymentId: !Ref DeploymentId
+        EnvironmentName: !Ref EnvironmentName
+        VpcStackName: !GetAtt VpcStack.Outputs.Name
+        ModelBucketName: !Ref ModelBucketName
+        BuildAccountId: !Ref BuildAccountId
+
+  QueueStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucketName}/compute/queue.cfn.yml
+      Parameters:
+        ParentStackName: !Ref AWS::StackName
+        DeploymentId: !Ref DeploymentId
+        EnvironmentName: !Ref EnvironmentName
+        BuildAccountId: !Ref BuildAccountId
+        JobQueueVisibilityTimeout: !Ref JobQueueVisibilityTimeout
+        JobCompletedQueueVisibilityTimeout: !Ref JobCompletedQueueVisibilityTimeout
+
+  DbStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucketName}/compute/db.cfn.yml
+      Parameters:
+        ParentStackName: !Ref AWS::StackName
+        DeploymentId: !Ref DeploymentId
+        EnvironmentName: !Ref EnvironmentName
+        VpcStackName: !GetAtt VpcStack.Outputs.Name
+        DatabaseName: !Ref DatabaseName
+        DatabaseUser: !Ref DatabaseUser
+        DatabasePassword: !Ref DatabasePassword
+        DatabaseSize: !Ref DatabaseSize
+        DatabaseInstanceClass: !Ref DatabaseInstanceClass
+        NeptuneInstanceClass: !Ref NeptuneInstanceClass
+
+  FargateStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucketName}/compute/fargate.cfn.yml
+      Parameters:
+        ParentStackName: !Ref AWS::StackName
+        DeploymentId: !Ref DeploymentId
+        EnvironmentName: !Ref EnvironmentName
+        BuildAccountId: !Ref BuildAccountId
+        VpcStackName: !GetAtt VpcStack.Outputs.Name
+        QueueStackName: !GetAtt QueueStack.Outputs.Name
+        ObjectStackName: !GetAtt ObjectStack.Outputs.Name
+        DbStackName: !GetAtt DbStack.Outputs.Name
+        SeedDockerImage: !Ref SeedDockerImage
+        ContainerCpuApi: !Ref ContainerCpuApi
+        ContainerMemoryApi: !Ref ContainerMemoryApi
+        ContainerCpuWorker: !Ref ContainerCpuWorker
+        ContainerMemoryWorker: !Ref ContainerMemoryWorker
+        AppIngressPort: !Ref AppIngressPort
+        WorkerServiceScaleEvaluationPeriods: !Ref WorkerServiceScaleEvaluationPeriods
+        WorkerServiceQueueDepthScaleOutThreshold: !Ref WorkerServiceQueueDepthScaleOutThreshold
+        WorkerServiceQueueDepthScaleInThreshold: !Ref WorkerServiceQueueDepthScaleInThreshold
+        WorkerTaskMinContainerCount: !Ref WorkerTaskMinContainerCount
+        WorkerTaskMaxContainerCount: !Ref WorkerTaskMaxContainerCount
+
+  DeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucketName}/compute/deploy.cfn.yml
+      Parameters:
+        ParentStackName: !Ref AWS::StackName
+        VpcStackName: !GetAtt VpcStack.Outputs.Name
+        FargateStackName: !GetAtt FargateStack.Outputs.Name
+        DeploymentId: !Ref DeploymentId
+        EnvironmentName: !Ref EnvironmentName
+        BuildAccountId: !Ref BuildAccountId
+        ObjectStackName: !GetAtt ObjectStack.Outputs.Name
+        CodeBuildDockerImage: !Ref CodeBuildDockerImage
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  VpcStackName:
+    Value: !GetAtt VpcStack.Outputs.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcStackName
+
+  ObjectStackName:
+    Value: !GetAtt ObjectStack.Outputs.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-ObjectStackName
+
+  QueueStackName:
+    Value: !GetAtt QueueStack.Outputs.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-QueueStackName
+
+  DbStackName:
+    Value: !GetAtt DbStack.Outputs.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-DbStackName
+
+  FargateStackName:
+    Value: !GetAtt FargateStack.Outputs.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-FargateStackName
+
+  DeployStackName:
+    Value: !GetAtt DeployStack.Outputs.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-DeployStackName
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  EnvironmentName:
+    Description: Environment
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub ${AWS::StackName}-EnvironmentName
+
+

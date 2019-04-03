@@ -1,0 +1,720 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Vpc
+
+
+Parameters:
+
+  ParentStackName:
+    Description: Name of parent stack
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+
+  DeploymentId:
+    Description: Deployment id
+    Type: String
+
+  EnvironmentName:
+    Description: Environment name, either dev or prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: Specify either dev or prod
+
+  AvailabilityZone0:
+    Description: The first availability zone in the region
+    Type: AWS::EC2::AvailabilityZone::Name
+    ConstraintDescription: Must be a valid availability zone
+
+  AvailabilityZone1:
+    Description: The second availability zone in the region
+    Type: AWS::EC2::AvailabilityZone::Name
+    ConstraintDescription: Must be a valid availability zone
+
+  SslCertificateArn:
+    Type: String
+    Description: The SSL/TLS certificate ARN
+    MinLength: 0
+    MaxLength: 2048
+    Default: ""
+
+  AlbIngressPort:
+    Description: The ALB ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 80
+
+  AppIngressPort:
+    Description: The application ingress port used by security groups
+    Type: Number
+    MinValue: 0
+    MaxValue: 65535
+    ConstraintDescription: TCP ports must be between 0 - 65535
+    Default: 8080
+
+  AppProtocol:
+    Type: String
+    Description: The application server protocol
+    Default: HTTP
+    AllowedValues:
+      - HTTP
+      - HTTPS
+    ConstraintDescription: Specify either HTTTP or HTTPS
+
+
+Mappings:
+
+  # Maps CIDR blocks to VPC and various subnets
+  CidrMap:
+    Vpc:
+      Cidr: 10.50.0.0/16
+    Public0:
+      Cidr: 10.50.0.0/24
+    Public1:
+      Cidr: 10.50.1.0/24
+    Private0:
+      Cidr: 10.50.64.0/19
+    Private1:
+      Cidr: 10.50.96.0/19
+
+
+Conditions:
+
+  TlsCertPasssed: !Not [ !Equals [ !Ref SslCertificateArn, "" ] ]
+
+  IsProd: !Equals [ !Ref EnvironmentName, prod ]
+
+
+Resources:
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [ CidrMap, Vpc, Cidr ]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Ref ParentStackName
+      - Key: Environment
+        Value: !Ref EnvironmentName
+      - Key: DeploymentId
+        Value: !Ref DeploymentId
+
+  PublicSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [ CidrMap, Public0, Cidr ]
+      AvailabilityZone: !Ref AvailabilityZone0
+      Tags:
+      - Key: Name
+        Value: !Sub ${ParentStackName}-PublicSubnet0
+      - Key: Environment
+        Value: !Ref EnvironmentName
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [ CidrMap, Public1, Cidr ]
+      AvailabilityZone: !Ref AvailabilityZone1
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-PublicSubnet1
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  PrivateSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [ CidrMap, Private0, Cidr ]
+      AvailabilityZone: !Ref AvailabilityZone0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-PrivateSubnet0
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [ CidrMap, Private1, Cidr ]
+      AvailabilityZone: !Ref AvailabilityZone1
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-PrivateSubnet1
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-igw
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-PublicRoute
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  PrivateRouteTableSubnet0:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-PrivateRoute0
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  PrivateRouteTableSubnet1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-PrivateRoute1
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation0:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet0
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetNetworkAclAssociation0:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet0
+      NetworkAclId: !GetAtt Vpc.DefaultNetworkAcl
+
+  PublicSubnetNetworkAclAssociation1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      NetworkAclId: !GetAtt Vpc.DefaultNetworkAcl
+
+  SecretsManagerVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Secrets Manager Vpc Endpoint security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref AppSecurityGroup
+        IpProtocol: tcp
+        ToPort: 443
+        FromPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-SecretsManagerVpcEndpointSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  CloudWatchLogsVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudWatch Logs Vpc Endpoint security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref AppSecurityGroup
+        IpProtocol: tcp
+        ToPort: 443
+        FromPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-CloudWatchLogsVpcEndpointSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  SqsVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SQS Vpc Endpoint security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref AppSecurityGroup
+        IpProtocol: tcp
+        ToPort: 443
+        FromPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-SqsVpcEndpointSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  SqsVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sqs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !GetAtt SqsVpcEndpointSecurityGroup.GroupId
+
+  SecretsManagerVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !GetAtt SecretsManagerVpcEndpointSecurityGroup.GroupId
+
+  CloudWatchLogsVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      PrivateDnsEnabled: true
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !GetAtt CloudWatchLogsVpcEndpointSecurityGroup.GroupId
+
+  EcrVpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECR Vpc Endpoint security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref AppSecurityGroup
+        IpProtocol: tcp
+        ToPort: 443
+        FromPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-EcrVpcEndpointSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  EcrDkrVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !GetAtt EcrVpcEndpointSecurityGroup.GroupId
+
+  EcrApiVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !GetAtt EcrVpcEndpointSecurityGroup.GroupId
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access to the DB
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: 5432
+        FromPort: 5432
+      SecurityGroupIngress:
+        SourceSecurityGroupId: !Ref AppSecurityGroup
+        IpProtocol: tcp
+        ToPort: 5432
+        FromPort: 5432
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-DbSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  NeptuneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable access to Neptune
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: 8182
+        FromPort: 8182
+      SecurityGroupIngress:
+        SourceSecurityGroupId: !Ref AppSecurityGroup
+        IpProtocol: tcp
+        ToPort: 8182
+        FromPort: 8182
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-NeptuneSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref AlbSecurityGroup
+        IpProtocol: tcp
+        ToPort: !Ref AppIngressPort
+        FromPort: !Ref AppIngressPort
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-AppSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  AppSecurityGroupFromAlbIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      ToPort: !Ref AppIngressPort
+      FromPort: !Ref AppIngressPort
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP/HTTPs ingress
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        ToPort: !Ref AlbIngressPort
+        FromPort: !Ref AlbIngressPort
+      Tags:
+        - Key: Name
+          Value: !Sub ${ParentStackName}-AlbSecurityGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  AlbSecurityGroupToAppEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      ToPort: !Ref AppIngressPort
+      FromPort: !Ref AppIngressPort
+      DestinationSecurityGroupId: !Ref AppSecurityGroup
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Port: !Ref AppIngressPort
+      Protocol: !Ref AppProtocol
+      Matcher:
+        HttpCode: 200
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /health
+      HealthCheckProtocol: !Ref AppProtocol
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: 300
+      TargetType: ip
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+    DependsOn: ApplicationLoadBalancer
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PublicSubnet0
+        - !Ref PublicSubnet1
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref ParentStackName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: !Ref AlbIngressPort
+      Protocol: !Ref AppProtocol
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref ApiTargetGroup
+    DependsOn:
+    - ApiTargetGroup
+    - ApplicationLoadBalancer
+
+  NatEip0:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+    DependsOn: VpcGatewayAttachment
+
+  NatEip1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+    DependsOn: VpcGatewayAttachment
+
+  NatGateway0:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip0.AllocationId
+      SubnetId: !Ref PublicSubnet0
+    DependsOn: VpcGatewayAttachment
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+    DependsOn: VpcGatewayAttachment
+
+  NatRoute0:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableSubnet0
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway0
+
+  NatRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableSubnet1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  SubnetRouteTableAssociationNatGateway0:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet0
+      RouteTableId: !Ref PrivateRouteTableSubnet0
+
+  SubnetRouteTableAssociationNatGateway1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTableSubnet1
+
+
+Outputs:
+
+  Name:
+    Description: Stack Name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub ${AWS::StackName}-Name
+
+  ParentStackName:
+    Description: Parent stack name
+    Value: !Ref ParentStackName
+    Export:
+      Name: !Sub ${AWS::StackName}-ParentStackName
+
+  DeploymentId:
+    Description: Deployment Id
+    Value: !Ref DeploymentId
+    Export:
+      Name: !Sub ${AWS::StackName}-DeploymentId
+
+  EnvironmentName:
+    Description: Environment
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub ${AWS::StackName}-EnvironmentName
+
+  ApplicationLoadBalancerArn:
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub ${AWS::StackName}-ApplicationLoadBalancerArn
+
+  ApplicationLoadBalancerDnsName:
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-ApplicationLoadBalancerDnsName
+
+  ApiTargetGroupArn:
+    Value: !Ref ApiTargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiTargetGroupArn
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcId
+
+  VpcCidr:
+    Description: Vpc cidr block
+    Value: !FindInMap [ CidrMap, Vpc, Cidr ]
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcCidr
+
+  PublicSubnet0:
+    Description: Public subnet 0 ID
+    Value: !Ref PublicSubnet0
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetId0
+
+  PublicSubnet1:
+    Description: Public subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetId1
+
+  PrivateSubnet0:
+    Description: Private subnet 0 ID
+    Value: !Ref PrivateSubnet0
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetId0
+
+  PrivateSubnet1:
+    Description: Private subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetId1
+
+  AlbSecurityGroupId:
+    Description: Security group ID for Internet-facing ALB
+    Value: !GetAtt AlbSecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-AlbSecurityGroupId
+
+  AppSecurityGroupId:
+    Description: Security group ID for app behind the Alb
+    Value: !GetAtt AppSecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-AppSecurityGroupId
+
+  DbSecurityGroupId:
+    Description: Security group ID for RDS database
+    Value: !GetAtt DbSecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-DbSecurityGroupId
+
+  NeptuneSecurityGroupId:
+    Description: Security group ID for Neptune database
+    Value: !GetAtt NeptuneSecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-NeptuneSecurityGroupId
+
+  AlbIngressPort:
+    Description: Alb ingress port
+    Value: !Ref AlbIngressPort
+    Export:
+      Name: !Sub ${AWS::StackName}-AlbIngressPort
+
+  AppIngressPort:
+    Description: App ingress port
+    Value: !Ref AppIngressPort
+    Export:
+      Name: !Sub ${AWS::StackName}-AppIngressPort
+
+  PrivateRouteTableSubnet0:
+    Description: Private route table subnet 0
+    Value: !Ref PrivateRouteTableSubnet0
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTableSubnet0
+
+  PrivateRouteTableSubnet1:
+    Description: Private route table subnet 1
+    Value: !Ref PrivateRouteTableSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTableSubnet1
+
