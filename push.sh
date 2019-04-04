@@ -1,4 +1,5 @@
-#!/bin/bash
+# !/bin/bash
+# Pushes customer compute and Yogi cicd templates to S3 in Yogi account
 
 TEMPLATE_BUCKET_NAME=yogi-poc-cfn
 

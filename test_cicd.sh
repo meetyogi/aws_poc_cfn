@@ -2,7 +2,7 @@
 
 DEPLOYMENT_STACK_NAME=cmpt0
 STACK_NAME=$DEPLOYMENT_STACK_NAME-cicd
-MODEL_BUCKET=TEST
+MODEL_BUCKET=test-model-bucket
 DEPLOYMENT_ACCOUNT_ID=
 BASE_ECR_IMAGE_ACCOUNT_ID=
 DEPLOYMENT_ID=my-test
@@ -12,14 +12,14 @@ ENV=dev
 GITHUB_USER=
 GITHUB_TOKEN=
 
-GIT_REPO_API=compute-example-api
-GIT_REPO_WORKER=compute-example-worker
+GIT_REPO_API=aws-poc-api
+GIT_REPO_WORKER=aws-poc-worker
 GIT_BRANCH_API=master
 GIT_BRANCH_WORKER=master
 
-TEMPLATE_BUCKET_NAME=poc-compute-example-cfn
+TEMPLATE_BUCKET_NAME=yogi-poc-cfn
 
-aws cloudformation create-stack \
+aws --region us-east-1 cloudformation create-stack \
   --stack-name $STACK_NAME \
   --template-url https://s3.amazonaws.com/$TEMPLATE_BUCKET_NAME/cicd.cfn.yml \
   --capabilities CAPABILITY_NAMED_IAM \

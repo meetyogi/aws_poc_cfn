@@ -9,7 +9,6 @@ Parameters:
 
   TemplateBucketName:
     Type: String
-    Default: poc-compute-example-cfn
     Description: The template bucket for the CloudFormation templates
 
   DeploymentId:
